@@ -1,0 +1,246 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides: firewall
+# Required-Start: $remote_fs $syslog
+# Required-Stop: $remote_fs $syslog
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Begin iptables rules
+# Description: Begin iptables rules
+### END INIT INFO
+
+#!/bin/sh
+
+SSH_PORT=
+SMTP_PORT=
+
+case "$1" in
+        -i) echo "Démarrage du Firewall" ;;
+	*) echo "Sleep 120 sec";sleep 120 ;;
+esac
+
+echo " [pas de spoofing]"
+if [ -e /proc/sys/net/ipv4/conf/all/rp_filter ] 
+then 
+  for filtre in /proc/sys/net/ipv4/conf/*/rp_filter 
+  do 
+    echo 1 > $filtre 
+  done 
+fi 
+
+echo " [SYN Cookie Protection]"
+echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+
+##########################################################
+###   NET TWEAKS
+##########################################################
+# Reduce DoS'ing ability by reducing timeouts
+# Defaults:
+#           echo 60 > /proc/sys/net/ipv4/tcp_fin_timeout
+#           echo 7200 > /proc/sys/net/ipv4/tcp_keepalive_time
+#           echo 1 > /proc/sys/net/ipv4/tcp_window_scaling
+#           echo 1 > /proc/sys/net/ipv4/tcp_sack
+#############################################################
+echo "Enabling reduction of the DoS'ing ability."
+echo "10" > /proc/sys/net/ipv4/tcp_fin_timeout
+echo "1800" > /proc/sys/net/ipv4/tcp_keepalive_time
+echo "0" > /proc/sys/net/ipv4/tcp_window_scaling
+echo "0" > /proc/sys/net/ipv4/tcp_sack
+echo "64" > /proc/sys/net/ipv4/ip_default_ttl
+
+
+# Increase the default queuelength. (Kernel Default: 1024)
+##########################################################
+  if [ -e /proc/sys/net/ipv4/ipv4/ip_queue_maxlen ]; then
+    echo "2048" > /proc/sys/net/ipv4/ip_queue_maxlen
+  fi
+
+# Enable ECN? (Explicit Congestion Notification) default no
+################################################
+  if [ -e /proc/sys/net/ipv4/tcp_ecn ]; then
+         echo "Enabling ECN (Explicit Congestion Notification)."
+      echo "1" > /proc/sys/net/ipv4/tcp_ecn
+   fi
+
+#########################################################
+# FIN TWEAKS
+#######################################################
+
+
+# Vider les tables actuelles
+iptables -t filter -F
+
+# Vider les règles personnelles
+iptables -t filter -X
+
+# Interdire toute connexion entrante et sortante
+iptables -t filter -P INPUT DROP
+iptables -t filter -P FORWARD DROP
+iptables -t filter -P OUTPUT DROP
+
+echo "Nouvelles chaines log"
+# NOUVELLES CHAINES LOG
+iptables -N LOG_DROP 
+iptables -A LOG_DROP -m limit --limit 1/s -j LOG --log-prefix '[IPTABLES DROP] : ' 
+iptables -A LOG_DROP -j DROP 
+
+iptables -N LOG_ACCEPT 
+iptables -A LOG_ACCEPT -j LOG --log-prefix '[IPTABLES ACCEPT] : ' 
+iptables -A LOG_ACCEPT -j ACCEPT 
+
+iptables -N LOGd_ACCEPT 
+iptables -A LOGd_ACCEPT -j LOG --log-prefix '[dns ACCEPT] : ' 
+iptables -A LOGd_ACCEPT -j ACCEPT 
+
+iptables -N LOG1_DROP 
+iptables -A LOG1_DROP -j LOG --log-prefix '[IPTABLES TCP state] : ' 
+iptables -A LOG1_DROP -j DROP 
+
+iptables -N LOG2_DROP 
+iptables -A LOG2_DROP -j LOG --log-prefix '[IPTABLES INVALID SOURCE] : ' 
+iptables -A LOG2_DROP -j DROP
+
+iptables -N LOG3_DROP 
+iptables -A LOG3_DROP -m limit --limit 1/s -j LOG --log-prefix '[NEW TCP are not SYN !] : ' 
+iptables -A LOG3_DROP -j DROP
+
+iptables -N LOG4_DROP 
+iptables -A LOG4_DROP -m limit --limit 1/s -j LOG --log-prefix '[LIMITING INCOMING !] : ' 
+iptables -A LOG4_DROP -j DROP
+
+iptables -N LOG5_DROP 
+iptables -A LOG5_DROP -j LOG --log-prefix '[IPTABLES INVALID PACKET] : ' 
+iptables -A LOG5_DROP -j DROP
+
+# ---
+echo "Ne pas casser les connexions etablies"
+# Ne pas casser les connexions etablies
+iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+echo "Autoriser loopback"
+# Autoriser loopback
+iptables -t filter -A INPUT -i lo -j ACCEPT
+iptables -t filter -A OUTPUT -o lo -j ACCEPT
+
+echo "Ping"
+# ICMP (Ping)
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A OUTPUT -p icmp -j ACCEPT
+
+iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 10/s -j ACCEPT
+
+#################################################################
+#PROTECTION BASIQUE 
+echo "Protection Basique"
+## SYN-FLOODING PROTECTION 
+iptables -N syn-flood 
+iptables -A INPUT -i eth0 -p tcp --syn -j syn-flood 
+iptables -A syn-flood -m limit --limit 10/s --limit-burst 15 -j RETURN
+iptables -A syn-flood -m limit --limit 1/s -j LOG --log-prefix '[SYN FLOOD max rate !] : ' 
+iptables -A syn-flood -j DROP
+
+## FRAGMENTS 
+iptables -A INPUT -i eth0 -f -j LOG --log-prefix "IPTABLES FRAGMENTS: " 
+iptables -A INPUT -i eth0 -f -j DROP 
+
+# All of the bits are cleared
+iptables -A INPUT -p tcp --tcp-flags ALL NONE -j LOG1_DROP
+
+# SYN and FIN are both set
+iptables -A INPUT -p tcp --tcp-flags SYN,FIN SYN,FIN -j LOG1_DROP
+
+# SYN and RST are both set
+iptables -A INPUT -p tcp --tcp-flags SYN,RST SYN,RST -j LOG1_DROP
+
+# FIN and RST are both set
+iptables -A INPUT -p tcp --tcp-flags FIN,RST FIN,RST -j LOG1_DROP
+
+# FIN is set without the expected accompanying ACK
+iptables -A INPUT -p tcp --tcp-flags ACK,FIN FIN -j LOG1_DROP
+
+# PSH is set without the expected accompanying ACK
+iptables -A INPUT -p tcp --tcp-flags ACK,PSH PSH -j LOG1_DROP
+
+# URG is set without the expected accompanying ACK
+iptables -A INPUT -p tcp --tcp-flags ACK,URG URG -j LOG1_DROP
+
+#No Scan
+iptables -A FORWARD -p tcp --tcp-flags SYN,ACK,FIN,RST RST -m limit --limit 1/s -j ACCEPT
+##################################################################################
+echo "Drop Netbios"
+#DROP pour le netbios et le 445 depuis le net sans logging
+iptables -A INPUT -i eth0 -p tcp --dport 445 -j DROP
+iptables -A INPUT -i eth0 -p tcp --dport 135 -j DROP
+iptables -A INPUT -i eth0 -p tcp --dport 137 -j DROP
+iptables -A INPUT -i eth0 -p tcp --dport 138 -j DROP
+iptables -A INPUT -i eth0 -p tcp --dport 139 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 445 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 135 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 137 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 138 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 139 -j DROP
+
+#DROP 1433 depuis le net sans logging
+iptables -A INPUT -i eth0 -p tcp --dport 1433 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 1434 -j DROP
+
+#DROP 1024 depuis le net sans logging
+iptables -A INPUT -i eth0 -p tcp --dport 1025 -j DROP
+iptables -A INPUT -i eth0 -p tcp --dport 1026 -j DROP
+iptables -A INPUT -i eth0 -p tcp --dport 1027 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 1025 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 1026 -j DROP
+iptables -A INPUT -i eth0 -p udp --dport 1027 -j DROP
+
+#Paquets invalides 
+iptables -A INPUT -p tcp -m state --state INVALID -j DROP
+
+# ---
+echo "DNS"
+# DNS In/Out
+iptables -t filter -A OUTPUT -p tcp --dport 53 -j ACCEPT
+iptables -t filter -A OUTPUT -p udp --dport 53 -j ACCEPT
+
+
+echo "SSH"
+# SSH In
+iptables -t filter -A INPUT -p tcp --dport $SSH_PORT -j ACCEPT
+iptables -t filter -A OUTPUT -p tcp --dport $SSH_PORT -j ACCEPT
+iptables -t filter -A OUTPUT -p tcp --dport 2222 -j ACCEPT
+iptables -t filter -A OUTPUT -p tcp --dport 22 -j ACCEPT
+
+echo "HTTP"
+## HTTP + HTTPS Out
+iptables -t filter -A OUTPUT -p tcp --dport 80 -j ACCEPT
+iptables -t filter -A OUTPUT -p tcp --dport 443 -j ACCEPT
+#
+# HTTP + HTTPS In
+iptables -t filter -A INPUT -p tcp --dport 80 -j ACCEPT
+iptables -t filter -A INPUT -p tcp --dport 443 -j ACCEPT
+
+# SMTP
+iptables -t filter -A OUTPUT -p tcp --dport $SMTP_PORT -j ACCEPT
+
+echo "udpflood"
+# udpflood
+iptables -N udp-flood 
+iptables -A INPUT -p udp -j udp-flood
+iptables -A udp-flood -m limit --limit 1/s --limit-burst 2 -j RETURN
+iptables -A udp-flood -m limit --limit 1/s -j LOG --log-prefix '[UDP FLOOD max rate !] : ' 
+iptables -A udp-flood -j DROP
+
+echo "block and log udp"
+# block and log udp
+iptables -A INPUT -p udp -m limit --limit 3/m --limit-burst 5 -j LOG --log-prefix 'Denied UDP port: '
+iptables -A INPUT -p udp -j DROP
+
+echo "Drop General"
+# POUR FINIR DROP GENERAL
+iptables -A FORWARD -j LOG_DROP 
+iptables -A INPUT -j LOG_DROP 
+iptables -A OUTPUT -j LOG_DROP 
+
+echo "Fini"
+
+/etc/init.d/fail2ban restart
