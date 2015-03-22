@@ -49,6 +49,24 @@ echo "0" > /proc/sys/net/ipv4/tcp_sack
 echo "64" > /proc/sys/net/ipv4/ip_default_ttl
 
 
+# Test TWEAKS
+##########################################################
+
+# PREVENT YOU SYSTEM FROM ANSWERING ICMP ECHO REQUESTS
+echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_all
+# DROP ICMP ECHO-REQUEST MESSAGES SENT TO BROADCAST OR MULTICAST ADDRESSES
+echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+# DONT ACCEPT ICMP REDIRECT MESSAGES
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+# DONT SEND ICMP REDIRECT MESSAGES
+echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
+# DROP SOURCE ROUTED PACKETS
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route
+# LOG PACKETS WITH IMPOSSIBLE ADDRESSES (DUE TO WRONG ROUTES) ON YOUR NETWORK
+echo 1 > /proc/sys/net/ipv4/conf/all/log_martians
+# DISABLE IPV4 FORWARDING
+echo 0 > /proc/sys/net/ipv4/ip_forward
+
 # Increase the default queuelength. (Kernel Default: 1024)
 ##########################################################
   if [ -e /proc/sys/net/ipv4/ipv4/ip_queue_maxlen ]; then
@@ -243,4 +261,3 @@ iptables -A OUTPUT -j LOG_DROP
 
 echo "Fini"
 
-/etc/init.d/fail2ban restart
